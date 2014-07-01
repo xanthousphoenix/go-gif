@@ -44,14 +44,14 @@ const (
 	fColorTableSize  = 7
 
 	// Image fields.
-	ifLocalColorTable = 1 << 7
-	ifInterlace       = 1 << 6
-	ifLocalColorTableSize   = 7
+	ifLocalColorTable     = 1 << 7
+	ifInterlace           = 1 << 6
+	ifLocalColorTableSize = 7
 
 	// Graphic control flags.
 	gcTransparentColorSet = 1 << 0
-	gcUserInputSet = 1 << 1
-	gcDisposalMethod = 7 << 2
+	gcUserInputSet        = 1 << 1
+	gcDisposalMethod      = 7 << 2
 )
 
 // Section indicators.
@@ -117,7 +117,6 @@ func (b *blockReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-
 func (d *decoder) decodeConfig(r io.Reader) (header *GIFHeader, err error) {
 	// Add buffering if r does not provide ReadByte.
 	if rr, ok := r.(reader); ok {
@@ -136,7 +135,7 @@ func (d *decoder) decode(r io.Reader) (g *GIF, err error) {
 
 	g.Header, err = d.readGifPreamble()
 	if err != nil {
-		return 
+		return
 	}
 
 	for {
@@ -176,7 +175,7 @@ func (d *decoder) decode(r io.Reader) (g *GIF, err error) {
 		case sImageDescriptor:
 			err = d.readFrame(false, g)
 			if err != nil {
-				return 
+				return
 			}
 		case sTrailer:
 			if len(g.Frames) == 0 {
@@ -225,8 +224,8 @@ func (d *decoder) readHeaderAndScreenDescriptor() (header *GIFHeader, err error)
 
 func unpackHeaderFields(packedFields byte) (gctPresent bool, cRes uint8, gctSize uint8) {
 	gctPresent = (packedFields & fColorMapFollows) != 0
-	cRes = uint8(packedFields & fColorResolution) >> 4
-	gctSize = uint8(packedFields & fColorTableSize) + 1
+	cRes = uint8(packedFields&fColorResolution) >> 4
+	gctSize = uint8(packedFields&fColorTableSize) + 1
 	return
 }
 
@@ -282,7 +281,7 @@ func (d *decoder) readFrame(hasGraphicsControl bool, g *GIF) (err error) {
 	frameNum := len(g.Frames)
 	var lastDisposalMethod uint8
 	if frameNum > 0 {
-		lastDisposalMethod = g.Frames[frameNum - 1].DisposalMethod
+		lastDisposalMethod = g.Frames[frameNum-1].DisposalMethod
 	}
 
 	// Create a new full-frame image using the frame's palette
@@ -293,13 +292,13 @@ func (d *decoder) readFrame(hasGraphicsControl bool, g *GIF) (err error) {
 		paintWith(ffi, bounds, func(_, _ int) uint8 { return g.Header.BackgroundColorIndex })
 	} else if frameNum > 0 && (lastDisposalMethod == fdmCombine || lastDisposalMethod == fdmNone) {
 		// put down a base of the previous frame
-		paintWith(ffi, bounds, func (x, y int) uint8 { return g.Frames[frameNum - 1].FrameImage.ColorIndexAt(x, y) })
+		paintWith(ffi, bounds, func(x, y int) uint8 { return g.Frames[frameNum-1].FrameImage.ColorIndexAt(x, y) })
 	} else if lastDisposalMethod == fdmRestorePrevious {
 		if frameNum < 2 { // deafult to clear since there is no frame to revert to
-			paintWith(ffi, bounds, func(_, _ int) uint8 { return g.Header.BackgroundColorIndex })	
+			paintWith(ffi, bounds, func(_, _ int) uint8 { return g.Header.BackgroundColorIndex })
 		} else {
 			// put down a base of 2 frames prior
-			paintWith(ffi, bounds, func (x, y int) uint8 { return g.Frames[frameNum - 2].FrameImage.ColorIndexAt(x, y) })
+			paintWith(ffi, bounds, func(x, y int) uint8 { return g.Frames[frameNum-2].FrameImage.ColorIndexAt(x, y) })
 		}
 	} else {
 		return fmt.Errorf("gif: undefined disposal method encountered: 0x%.2x", lastDisposalMethod)
@@ -317,7 +316,7 @@ func (d *decoder) readFrame(hasGraphicsControl bool, g *GIF) (err error) {
 		})
 	} else {
 		// Opaque copy:
-		paintWith(ffi, frame.FrameImage.Rect, func(x, y int) uint8 { return frame.FrameImage.ColorIndexAt(x, y)})
+		paintWith(ffi, frame.FrameImage.Rect, func(x, y int) uint8 { return frame.FrameImage.ColorIndexAt(x, y) })
 	}
 
 	// overwrite the frame with the full image, then append to the frame slice
@@ -341,7 +340,7 @@ func (d *decoder) readOtherExtension(extension byte) (loopCount int, err error) 
 		var b byte
 		b, err = d.r.ReadByte()
 		if err != nil {
-			return 
+			return
 		}
 		// The spec requires size be 11, but Adobe sometimes uses 10.
 		size = int(b)
@@ -351,7 +350,7 @@ func (d *decoder) readOtherExtension(extension byte) (loopCount int, err error) 
 	}
 	if size > 0 {
 		if _, err = io.ReadFull(d.r, d.tmp[0:size]); err != nil {
-			return 
+			return
 		}
 	}
 
@@ -416,13 +415,13 @@ func (d *decoder) readImageDescriptor(f *GIFFrame, width, height int) error {
 }
 
 func (f *GIFFrame) frameRect() image.Rectangle {
-	return image.Rect(int(f.Left), int(f.Top), int(f.Left) + int(f.Width), int(f.Top) + int(f.Height))
+	return image.Rect(int(f.Left), int(f.Top), int(f.Left)+int(f.Width), int(f.Top)+int(f.Height))
 }
 
 func unpackImageDescriptorFields(packedFields byte) (lctPresent, interlaced bool, lctSize uint8) {
 	lctPresent = (packedFields & ifLocalColorTable) != 0
 	interlaced = (packedFields & ifInterlace) != 0
-	lctSize = uint8(packedFields & ifLocalColorTableSize) + 1
+	lctSize = uint8(packedFields&ifLocalColorTableSize) + 1
 	return
 }
 
@@ -525,40 +524,42 @@ type GIFHeader struct {
 	VersionSignature string // should be "GIF87a" or (more likely) "GIF89a"
 
 	// Logical Screen Descriptor block
-	Width uint16 // total width of the image
-	Height uint16 // total height of the image
-	BackgroundColorIndex uint8 // index into the global palette for the background color
-	PixelAspectRatio uint8 // aspect ratio of the pixels, normally ignored/0
-	GlobalColorTablePresent bool // there is a global color palette
-	ColorResolution uint8 // maxes out at 7
-	GlobalColorTableSize uint8 // also maxes at 7
+	Width                   uint16 // total width of the image
+	Height                  uint16 // total height of the image
+	BackgroundColorIndex    uint8  // index into the global palette for the background color
+	PixelAspectRatio        uint8  // aspect ratio of the pixels, normally ignored/0
+	GlobalColorTablePresent bool   // there is a global color palette
+	ColorResolution         uint8  // in the range of [1, 8]
+	GlobalColorTableSize    uint8  // also in the range [1, 8]
 	// don't care about the sort flag
 
 	// global olor table block
 	GlobalColorTable color.Palette // global palette
 
 	// Application extension
-	LoopCount int  // The loop count. -1 if none specified
+	LoopCount int // The loop count. -1 if none specified
 }
+
+// TODO: implement func (h *GIFHeader) patchHeader() (err error)
 
 // Contains the data for each frame of the GIF.
 type GIFFrame struct {
 	// Graphics Control Block
-	GCPresent bool // whether or not there is a need for graphics control block for encoding
-	DisposalMethod uint8 // which disposal method: 0x00 -> none, 0x01 -> combine, 0x02 -> clear, 0x03 -> restore to previous
-	UserInput bool // not used often, but whether to advance the frame on input (probably set to false for most everything)
-	TransparentPresent bool // whether there is a transparent color
-	DelayTime uint16 // delay for the frame in milliseconds
-	TransparentColorIndex uint8 // the index of the transparent color, should it exist
+	GCPresent             bool   // whether or not there is a need for graphics control block for encoding
+	DisposalMethod        uint8  // which disposal method: 0x00 -> none, 0x01 -> combine, 0x02 -> clear, 0x03 -> restore to previous
+	UserInput             bool   // not used often, but whether to advance the frame on input (probably set to false for most everything)
+	TransparentPresent    bool   // whether there is a transparent color
+	DelayTime             uint16 // delay for the frame in milliseconds
+	TransparentColorIndex uint8  // the index of the transparent color, should it exist
 
 	//Image Descriptor Block
-	Left uint16 // left side of the image
-	Top uint16 // top side of the image
-	Width uint16 // width of the image
-	Height uint16 // height of the image
-	LocalColorTablePresent bool // whether or not their is a local color table
-	LocalColorTableSize uint8 // size of the local color table
-	Interlaced bool // whether or not the frame was interlaced
+	Left                   uint16 // left side of the image
+	Top                    uint16 // top side of the image
+	Width                  uint16 // width of the image
+	Height                 uint16 // height of the image
+	LocalColorTablePresent bool   // whether or not their is a local color table
+	LocalColorTableSize    uint8  // size of the local color table
+	Interlaced             bool   // whether or not the frame was interlaced
 	// don't care about the sorting of the table (at least for now)
 
 	// Local Color Table Block
@@ -571,6 +572,13 @@ type GIFFrame struct {
 	FrameImage *image.Paletted // full image of the frame
 }
 
+// TODO: implement func (f *GIFFrame) patchFrame() (err error)
+
+// returns the subsection of the frame contained in the actual frame data
+func (f *GIFFrame) ActualFrameImage() *image.Paletted {
+	return f.FrameImage.SubImage(f.frameRect()).(*image.Paletted)
+}
+
 // GIF represents the information stored in a GIF, as per the specification.
 // The non-functional Application, Plain Text, and Comment Extension Blocks are dropped.
 type GIF struct {
@@ -579,10 +587,20 @@ type GIF struct {
 	Frames []*GIFFrame
 }
 
-// returns the subsection of the frame contained in the actual frame data
-func (f *GIFFrame) ActualFrameImage() *image.Paletted {
-	return f.FrameImage.SubImage(f.frameRect()).(*image.Paletted)
-}
+// TODO: uncomment this later...
+// func (g *GIF) patchGIF() (err error) {
+// 	err = g.Header.patchHeader()
+// 	if err != nil {ds
+// 		return
+// 	}
+// 	for _, frame := range g.Frames() {
+// 		err = frame.patchFrame()
+// 		if err != nil {
+// 			return
+// 		}
+// 	}
+// 	return
+// }
 
 // Decode reads a GIF image from r and returns the first embedded
 // image as an image.Image.

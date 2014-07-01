@@ -17,13 +17,15 @@ import (
 	"fmt"
 )
 
-// Graphic control extension fields.
 const (
-	gcLabel     = 0xF9
-	gcBlockSize = 0x04
+	GIFsignature = "GIF89a"
+
+	appSize = 0x0B
+
+	gcSize = 0x04
 )
 
-var log2Lookup = [8]int{2, 4, 8, 16, 32, 64, 128, 256}
+var log2Lookup = [9]int{-1, 2, 4, 8, 16, 32, 64, 128, 256}
 
 func log2(x int) int {
 	for i, v := range log2Lookup {
@@ -51,10 +53,7 @@ type writer interface {
 type encoder struct {
 	// w is the writer to write to. err is the first error encountered during
 	// writing. All attempted writes after the first error become no-ops.
-	w   writer
-	err error
-	// g is a reference to the data that is being encoded.
-	g *GIF
+	w writer
 	// buf is a scratch buffer. It must be at least 768 so we can write the color map.
 	buf [1024]byte
 }
@@ -67,10 +66,7 @@ type blockWriter struct {
 	e *encoder
 }
 
-func (b blockWriter) Write(data []byte) (int, error) {
-	if b.e.err != nil {
-		return 0, b.e.err
-	}
+func (b blockWriter) Write(data []byte) (n int, err error) {
 	if len(data) == 0 {
 		return 0, nil
 	}
@@ -80,90 +76,110 @@ func (b blockWriter) Write(data []byte) (int, error) {
 		total += n
 		b.e.buf[0] = uint8(n)
 
-		n, b.e.err = b.e.w.Write(b.e.buf[:n+1])
-		if b.e.err != nil {
-			return 0, b.e.err
+		n, err = b.e.w.Write(b.e.buf[:n+1])
+		if err != nil {
+			return 0, err
 		}
 	}
-	return total, b.e.err
+	return total, err
 }
 
-func (e *encoder) flush() {
-	if e.err != nil {
-		return
-	}
-	e.err = e.w.Flush()
+func (e *encoder) write(p []byte) (err error) {
+	_, err = e.w.Write(p)
+	return
 }
 
-func (e *encoder) write(p []byte) {
-	if e.err != nil {
-		return
-	}
-	_, e.err = e.w.Write(p)
-}
-
-func (e *encoder) writeByte(b byte) {
-	if e.err != nil {
-		return
-	}
-	e.err = e.w.WriteByte(b)
-}
-
-func (e *encoder) writeHeader() {
-	if e.err != nil {
-		return
-	}
-	_, e.err = io.WriteString(e.w, "GIF89a")
-	if e.err != nil {
+// EncodeAll writes the GIF as per the spec.
+func EncodeAll(w io.Writer, g *GIF) (err error) {
+	if len(g.Frames) == 0 {
+		err = errors.New("gif: must provide at least one image")
 		return
 	}
 
-	pm := e.g.Image[0]
-	// Logical screen width and height.
-	writeUint16(e.buf[0:2], uint16(pm.Bounds().Max.X))
-	writeUint16(e.buf[2:4], uint16(pm.Bounds().Max.Y))
-	e.write(e.buf[:4])
+	// g.patchGIF() // not implemented yet
 
-	// All frames have a local color table, so a global color table
-	// is not needed. <- FALSE, you need a global color table to set the background color
-	// if a global color table exists, set it with default 
-	val := byte(0x00)
-	if len(e.g.GlobalColorTable) > 0 {
-		val = 0xF0 | byte(log2(len(e.g.GlobalColorTable)) - 1)
-	}
-	e.buf[0] = val
-	e.buf[1] = 0x00 // Background Color Index.
-	e.buf[2] = 0x00 // Pixel Aspect Ratio.
-	e.write(e.buf[:3])
-	if val != 0x00 {
-		e.writeColorTable(e.g.GlobalColorTable, log2(len(e.g.GlobalColorTable)))
+	e := encoder{}
+	if ww, ok := w.(writer); ok {
+		e.w = ww
+	} else {
+		e.w = bufio.NewWriter(w)
 	}
 
-	// Add animation info if necessary.
-	if len(e.g.Image) > 1 {
-		e.buf[0] = 0x21 // Extension Introducer.
-		e.buf[1] = 0xff // Application Label.
-		e.buf[2] = 0x0b // Block Size.
-		e.write(e.buf[:3])
-		_, e.err = io.WriteString(e.w, "NETSCAPE2.0") // Application Identifier.
-		if e.err != nil {
+	err = e.writePreamble(g.Header, len(g.Frames) > 1)
+	if err != nil {
+		return
+	}
+	for _, frame := range g.Frames {
+		err = e.writeFrame(frame)
+		if err != nil {
 			return
 		}
-		e.buf[0] = 0x03 // Block Size.
-		e.buf[1] = 0x01 // Sub-block Index.
-		writeUint16(e.buf[2:4], uint16(e.g.LoopCount))
-		e.buf[4] = 0x00 // Block Terminator.
-		e.write(e.buf[:5])
 	}
-
+	err = e.w.WriteByte(sTrailer)
+	if err != nil {
+		return
+	}
+	err = e.w.Flush()
+	return
 }
 
-func (e *encoder) writeColorTable(p color.Palette, size int) {
-	if e.err != nil {
+func (e *encoder) writePreamble(h *GIFHeader, loop bool) (err error) {
+	err = e.writeHeader(h)
+	if err != nil {
 		return
 	}
 
-	for i := 0; i < log2Lookup[size]; i++ {
+	err = e.writeScreenDescriptor(h)
+	if err != nil {
+		return
+	}
+
+	if h.GlobalColorTablePresent {
+		err = e.writeColorTable(h.GlobalColorTable, h.GlobalColorTableSize)
+		if err != nil {
+			return
+		}
+	}
+
+	if loop {
+		e.writeLoopCount(h)
+	}
+	return
+}
+
+func (e *encoder) writeHeader(h *GIFHeader) (err error) {
+	_, err = io.WriteString(e.w, h.VersionSignature)
+	return
+}
+
+func (e *encoder) writeScreenDescriptor(h *GIFHeader) error {
+	writeUint16(e.buf[0:2], h.Width)
+	writeUint16(e.buf[2:4], h.Height)
+	e.buf[4] = h.makeHeaderPackedField()
+	if h.GlobalColorTablePresent {
+		e.buf[5] = byte(h.BackgroundColorIndex)
+	} else {
+		e.buf[5] = 0x00
+	}
+	e.buf[6] = byte(h.PixelAspectRatio)
+	return e.write(e.buf[:7])
+}
+
+func (h *GIFHeader) makeHeaderPackedField() byte {
+	val := byte(0x00)
+	if h.GlobalColorTablePresent {
+		val = 0x80
+	}
+	return val | byte((h.ColorResolution-1)<<4) | byte(h.GlobalColorTableSize-1)
+}
+
+func (e *encoder) writeColorTable(p color.Palette, cts uint8) (err error) {
+	if cts < 1 || cts > 8 {
+		err = fmt.Errorf("gif: invalid color table size: 0x%.2x", cts)
+		return
+	}
+
+	for i := 0; i < log2Lookup[cts]; i++ {
 		if i < len(p) {
 			r, g, b, _ := p[i].RGBA()
 			e.buf[3*i+0] = uint8(r >> 8)
@@ -176,87 +192,112 @@ func (e *encoder) writeColorTable(p color.Palette, size int) {
 			e.buf[3*i+2] = 0x00
 		}
 	}
-	e.write(e.buf[:3*log2Lookup[size]])
+	err = e.write(e.buf[:3*log2Lookup[cts]])
+	return
 }
 
-func (e *encoder) writeImageBlock(pm *image.Paletted, delay, transparentIndex int, disposalMethod byte) {
-	if e.err != nil {
+func (e *encoder) writeLoopCount(h *GIFHeader) (err error) {
+	e.buf[0] = sExtension
+	e.buf[1] = eApplication
+	e.buf[2] = appSize
+	e.write(e.buf[:3])
+	_, err = io.WriteString(e.w, "NETSCAPE2.0") // Application Identifier.
+	if err != nil {
 		return
 	}
+	e.buf[0] = 0x03 // Block Size.
+	e.buf[1] = 0x01 // Sub-block Index.
+	writeUint16(e.buf[2:4], uint16(h.LoopCount))
+	e.buf[4] = 0x00 // Block Terminator.
+	err = e.write(e.buf[:5])
+	return
+}
 
-	if len(pm.Palette) == 0 {
-		e.err = errors.New("gif: cannot encode image block with empty palette")
-		return
-	}
-
-	b := pm.Bounds()
-	if b.Dx() >= 1<<16 || b.Dy() >= 1<<16 || b.Min.X < 0 || b.Min.X >= 1<<16 || b.Min.Y < 0 || b.Min.Y >= 1<<16 {
-		e.err = errors.New("gif: image block is too large to encode")
-		return
-	}
-
-	// -1 means unknown transparent index; -2 means definitely no transparent index.
-	if transparentIndex == -1 {
-		for i, c := range pm.Palette {
-			if _, _, _, a := c.RGBA(); a == 0 {
-				transparentIndex = i
-				break
-			} else {
-				transparentIndex = -2
-			}
+func (e *encoder) writeFrame(f *GIFFrame) (err error) {
+	if f.GCPresent {
+		err = e.writeGraphicsControl(f)
+		if err != nil {
+			return
 		}
 	}
 
-	if delay > 0 || transparentIndex >= 0 {
-		fmt.Printf("%#v\n", pm.Palette[transparentIndex])
-		e.buf[0] = sExtension  // Extension Introducer.
-		e.buf[1] = gcLabel     // Graphic Control Label.
-		e.buf[2] = gcBlockSize // Block Size.
-		if transparentIndex >= 0 {
-			e.buf[3] = disposalMethod << 5 | 0x01
-		} else {
-			e.buf[3] = disposalMethod << 5 | 0x00
-		}
-		writeUint16(e.buf[4:6], uint16(delay)) // Delay Time (1/100ths of a second)
-
-		// Transparent color index.
-		if transparentIndex >= 0 {
-			fmt.Printf("trans: %#v\n", pm.Palette[transparentIndex])
-			e.buf[6] = uint8(transparentIndex)
-		} else {
-			e.buf[6] = 0x00
-		}
-		e.buf[7] = 0x00 // Block Terminator.
-		e.write(e.buf[:8])
+	err = e.writeImageDescriptor(f)
+	if err != nil {
+		return
 	}
+
+	if f.LocalColorTablePresent {
+		err = e.writeColorTable(f.LocalColorTable, f.LocalColorTableSize)
+		if err != nil {
+			return
+		}
+	}
+
+	err = e.writeImageData(f)
+	return
+}
+
+func (e *encoder) writeGraphicsControl(f *GIFFrame) error {
+	e.buf[0] = sExtension
+	e.buf[1] = eGraphicControl
+	e.buf[2] = gcSize
+	e.buf[3] = f.makeGraphicsControlPackedField()
+	writeUint16(e.buf[4:6], f.DelayTime)
+	if f.TransparentPresent {
+		e.buf[6] = byte(f.TransparentColorIndex)
+	} else {
+		e.buf[6] = 0x00
+	}
+	e.buf[7] = 0x00
+	return e.write(e.buf[:8])
+}
+
+func (f *GIFFrame) makeGraphicsControlPackedField() byte {
+	val := byte(0x00)
+	if f.TransparentPresent {
+		val = 0x01
+	}
+	return byte(f.DisposalMethod<<3) | val
+}
+
+func (e *encoder) writeImageDescriptor(f *GIFFrame) error {
 	e.buf[0] = sImageDescriptor
-	writeUint16(e.buf[1:3], uint16(b.Min.X))
-	writeUint16(e.buf[3:5], uint16(b.Min.Y))
-	writeUint16(e.buf[5:7], uint16(b.Dx()))
-	writeUint16(e.buf[7:9], uint16(b.Dy()))
-	e.write(e.buf[:9])
+	writeUint16(e.buf[1:3], f.Left)
+	writeUint16(e.buf[3:5], f.Top)
+	writeUint16(e.buf[5:7], f.Width)
+	writeUint16(e.buf[7:9], f.Height)
+	e.buf[9] = f.makeImageDescriptorPackedField()
+	return e.write(e.buf[:10])
+}
 
-	paddedSize := log2(len(pm.Palette)) // Size of Local Color Table: 2^(1+n).
-	// Interlacing is not supported.
-	e.writeByte(0x80 | uint8(paddedSize))
+func (f *GIFFrame) makeImageDescriptorPackedField() byte {
+	val1 := byte(0x00)
+	if f.LocalColorTablePresent {
+		val1 = 0x80
+	}
+	val2 := byte(0x00)
+	if f.Interlaced {
+		val2 = 0x40
+	}
+	return val1 | val2 | byte(f.LocalColorTableSize)
+}
 
-	// Local Color Table.
-	e.writeColorTable(pm.Palette, paddedSize)
-
-	litWidth := paddedSize + 1
+func (e *encoder) writeImageData(f *GIFFrame) (err error) {
+	litWidth := f.LocalColorTableSize
 	if litWidth < 2 {
 		litWidth = 2
 	}
-	e.writeByte(uint8(litWidth)) // LZW Minimum Code Size.
+	err = e.w.WriteByte(uint8(litWidth)) // LZW Minimum Code Size.
 
-	lzww := lzw.NewWriter(blockWriter{e: e}, lzw.LSB, litWidth)
-	_, e.err = lzww.Write(pm.Pix)
-	if e.err != nil {
+	lzww := lzw.NewWriter(blockWriter{e: e}, lzw.LSB, int(litWidth))
+	_, err = lzww.Write(f.FrameImage.Pix)
+	if err != nil {
 		lzww.Close()
 		return
 	}
 	lzww.Close()
-	e.writeByte(0x00) // Block Terminator.
+	e.w.WriteByte(0x00) // Block Terminator.
+	return
 }
 
 // Options are the encoding parameters.
@@ -265,6 +306,9 @@ type Options struct {
 	// It ranges from 1 to 256.
 	NumColors int
 
+	// Whether or not to interlace the output images
+	Interlace bool
+
 	// Quantizer is used to produce a palette with size NumColors.
 	// palette.Plan9 is used in place of a nil Quantizer.
 	Quantizer draw.Quantizer
@@ -272,49 +316,6 @@ type Options struct {
 	// Drawer is used to convert the source image to the desired palette.
 	// draw.FloydSteinberg is used in place of a nil Drawer.
 	Drawer draw.Drawer
-}
-
-// EncodeAll writes the images in g to w in GIF format with the
-// given loop count and delay between frames.
-func EncodeAll(w io.Writer, g *GIF) error {
-	if len(g.Image) == 0 {
-		return errors.New("gif: must provide at least one image")
-	}
-
-	if len(g.Image) != len(g.Delay) {
-		return errors.New("gif: mismatched image and delay lengths")
-	}
-	if (len(g.TransparentIndices) > 0) && (len(g.Image) != len(g.TransparentIndices)) {
-		return errors.New("gif: mismatched image and TransparentIndices lengths")
-	}
-
-	if g.LoopCount < 0 {
-		g.LoopCount = 0
-	}
-
-	e := encoder{g: g}
-	if ww, ok := w.(writer); ok {
-		e.w = ww
-	} else {
-		e.w = bufio.NewWriter(w)
-	}
-
-	// for i, x := range g.Image[0].Palette {
-	// 	fmt.Printf("%x -> %#v\n", i, x)
-	// }
-
-	e.writeHeader()
-	for i, pm := range g.Image {
-		ti := -1
-		if len(g.TransparentIndices) > 0 {
-			ti = g.TransparentIndices[i]
-		}
-		println("frame:", i, ", dm:", g.DisposalMethods[i])
-		e.writeImageBlock(pm, g.Delay[i], ti, g.DisposalMethods[i])
-	}
-	e.writeByte(sTrailer)
-	e.flush()
-	return e.err
 }
 
 // Encode writes the Image m to w in GIF format.
@@ -347,9 +348,22 @@ func Encode(w io.Writer, m image.Image, o *Options) error {
 	}
 
 	return EncodeAll(w, &GIF{
-		Image:              []*image.Paletted{pm},
-		Delay:              []int{0},
-		TransparentIndices: []int{-1},
-		DisposalMethods:    []byte{0x00},
+		Header: &GIFHeader{
+			VersionSignature: GIFsignature,
+			Width:            uint16(pm.Rect.Dx()),
+			Height:           uint16(pm.Rect.Dy()),
+			ColorResolution:  uint8(log2(len(pm.Palette))),
+		},
+		Frames: []*GIFFrame{
+			&GIFFrame{
+				Left:   0,
+				Top:    0,
+				Width:  uint16(pm.Rect.Max.X),
+				Height: uint16(pm.Rect.Max.Y),
+				// no local color table needed for the single image
+				Interlaced: opts.Interlace,
+				FrameImage: pm,
+			},
+		},
 	})
 }
