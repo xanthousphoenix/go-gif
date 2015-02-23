@@ -131,6 +131,13 @@ func (d *decoder) decodeConfig(r io.Reader) (header *GIFHeader, err error) {
 
 // decode reads a GIF image from r and stores the data from the GIF in g.
 func (d *decoder) decode(r io.Reader) (g *GIF, err error) {
+	// Add buffering if r does not provide ReadByte.
+	if rr, ok := r.(reader); ok {
+		d.r = rr
+	} else {
+		d.r = bufio.NewReader(r)
+	}
+
 	g = &GIF{}
 
 	g.Header, err = d.readGifPreamble()
@@ -251,6 +258,7 @@ func (d *decoder) readColorMap(colorTableSize uint8) (color.Palette, error) {
 func (d *decoder) readFrame(hasGraphicsControl bool, g *GIF) (err error) {
 	frame := &GIFFrame{}
 	if hasGraphicsControl {
+		frame.GCPresent = true
 		err = d.readGraphicControl(frame)
 		if err != nil {
 			return
@@ -278,49 +286,50 @@ func (d *decoder) readFrame(hasGraphicsControl bool, g *GIF) (err error) {
 		return
 	}
 
-	frameNum := len(g.Frames)
-	var lastDisposalMethod uint8
-	if frameNum > 0 {
-		lastDisposalMethod = g.Frames[frameNum-1].DisposalMethod
-	}
+	// TODO: implement the full-frame images correctly
+	// frameNum := len(g.Frames)
+	// var lastDisposalMethod uint8
+	// if frameNum > 0 {
+	// 	lastDisposalMethod = g.Frames[frameNum-1].DisposalMethod
+	// }
 
-	// Create a new full-frame image using the frame's palette
-	bounds := image.Rect(0, 0, int(g.Header.Width), int(g.Header.Height))
-	ffi := image.NewPaletted(bounds, frame.FrameImage.Palette)
+	// // Create a new full-frame image using the frame's palette
+	// bounds := image.Rect(0, 0, int(g.Header.Width), int(g.Header.Height))
+	// ffi := image.NewPaletted(bounds, frame.FrameImage.Palette)
 
-	if frameNum == 0 || lastDisposalMethod == fdmBGClear {
-		paintWith(ffi, bounds, func(_, _ int) uint8 { return g.Header.BackgroundColorIndex })
-	} else if frameNum > 0 && (lastDisposalMethod == fdmCombine || lastDisposalMethod == fdmNone) {
-		// put down a base of the previous frame
-		paintWith(ffi, bounds, func(x, y int) uint8 { return g.Frames[frameNum-1].FrameImage.ColorIndexAt(x, y) })
-	} else if lastDisposalMethod == fdmRestorePrevious {
-		if frameNum < 2 { // deafult to clear since there is no frame to revert to
-			paintWith(ffi, bounds, func(_, _ int) uint8 { return g.Header.BackgroundColorIndex })
-		} else {
-			// put down a base of 2 frames prior
-			paintWith(ffi, bounds, func(x, y int) uint8 { return g.Frames[frameNum-2].FrameImage.ColorIndexAt(x, y) })
-		}
-	} else {
-		return fmt.Errorf("gif: undefined disposal method encountered: 0x%.2x", lastDisposalMethod)
-	}
+	// if frameNum == 0 || lastDisposalMethod == fdmBGClear {
+	// 	paintWith(ffi, bounds, func(_, _ int) uint8 { return g.Header.BackgroundColorIndex })
+	// } else if frameNum > 0 && (lastDisposalMethod == fdmCombine || lastDisposalMethod == fdmNone) {
+	// 	// put down a base of the previous frame
+	// 	paintWith(ffi, bounds, func(x, y int) uint8 { return g.Frames[frameNum-1].FrameImage.ColorIndexAt(x, y) })
+	// } else if lastDisposalMethod == fdmRestorePrevious {
+	// 	if frameNum < 2 { // deafult to clear since there is no frame to revert to
+	// 		paintWith(ffi, bounds, func(_, _ int) uint8 { return g.Header.BackgroundColorIndex })
+	// 	} else {
+	// 		// put down a base of 2 frames prior
+	// 		paintWith(ffi, bounds, func(x, y int) uint8 { return g.Frames[frameNum-2].FrameImage.ColorIndexAt(x, y) })
+	// 	}
+	// } else {
+	// 	return fmt.Errorf("gif: undefined disposal method encountered: 0x%.2x", lastDisposalMethod)
+	// }
 
-	// Copy the temporary frame onto the current frame, skipping transparent:
-	if frame.TransparentPresent {
-		// Transparent overlay:
-		paintWith(ffi, frame.FrameImage.Rect, func(x, y int) uint8 {
-			c := frame.FrameImage.ColorIndexAt(x, y)
-			if c == frame.TransparentColorIndex { // if transparent, use what's already there
-				c = ffi.ColorIndexAt(x, y)
-			}
-			return c
-		})
-	} else {
-		// Opaque copy:
-		paintWith(ffi, frame.FrameImage.Rect, func(x, y int) uint8 { return frame.FrameImage.ColorIndexAt(x, y) })
-	}
+	// // Copy the temporary frame onto the current frame, skipping transparent:
+	// if frame.TransparentPresent {
+	// 	// Transparent overlay:
+	// 	paintWith(ffi, frame.FrameImage.Rect, func(x, y int) uint8 {
+	// 		c := frame.FrameImage.ColorIndexAt(x, y)
+	// 		if c == frame.TransparentColorIndex { // if transparent, use what's already there
+	// 			c = ffi.ColorIndexAt(x, y)
+	// 		}
+	// 		return c
+	// 	})
+	// } else {
+	// 	// Opaque copy:
+	// 	paintWith(ffi, frame.FrameImage.Rect, func(x, y int) uint8 { return frame.FrameImage.ColorIndexAt(x, y) })
+	// }
 
-	// overwrite the frame with the full image, then append to the frame slice
-	frame.FrameImage = ffi
+	// // overwrite the frame with the full image, then append to the frame slice
+	// frame.FrameImage = ffi
 	g.Frames = append(g.Frames, frame)
 	return nil
 }
@@ -533,11 +542,25 @@ type GIFHeader struct {
 	GlobalColorTableSize    uint8  // also in the range [1, 8]
 	// don't care about the sort flag
 
-	// global olor table block
+	// global color table block
 	GlobalColorTable color.Palette // global palette
 
 	// Application extension
 	LoopCount int // The loop count. -1 if none specified
+}
+
+func (h *GIFHeader) printDebug() {
+	fmt.Printf("Signature: %v\n", h.VersionSignature)
+	fmt.Printf("Width: %x\n", h.Width)
+	fmt.Printf("Height: %x\n", h.Height)
+	fmt.Printf("BCI: %x\n", h.BackgroundColorIndex)
+	fmt.Printf("PAR: %x\n", h.PixelAspectRatio)
+	fmt.Printf("Global Table present: %v\n", h.GlobalColorTablePresent)
+	// if h.GlobalColorTablePresent {
+	fmt.Printf("Global Table Size: %x\n", h.GlobalColorTableSize)
+	// }
+	fmt.Printf("Color Resolution: %x\n", h.ColorResolution)
+	// fmt.Printf("LoopCount: %x\n", h.LoopCount)
 }
 
 // TODO: implement func (h *GIFHeader) patchHeader() (err error)
@@ -572,6 +595,30 @@ type GIFFrame struct {
 	FrameImage *image.Paletted // full image of the frame
 }
 
+func (f *GIFFrame) printDebug() {
+	fmt.Printf("Graphics Control Present: %v\n", f.GCPresent)
+	if f.GCPresent {
+		fmt.Printf("Disposal Method: %x\n", f.DisposalMethod)
+		fmt.Printf("User Input: %v\n", f.UserInput)
+		fmt.Printf("Transparent Present: %v\n", f.TransparentPresent)
+		// if f.TransparentPresent {
+		fmt.Printf("TransparentColorIndex: %x\n", f.TransparentColorIndex)
+		// }
+		fmt.Printf("DelayTime: %x\n", f.DelayTime)
+	}
+
+	fmt.Printf("Left: %x\n", f.Left)
+	fmt.Printf("Top: %x\n", f.Top)
+	fmt.Printf("Width: %x\n", f.Width)
+	fmt.Printf("Height: %x\n", f.Height)
+	fmt.Printf("Local Table Present: %v\n", f.LocalColorTablePresent)
+	// if f.LocalColorTablePresent {
+	fmt.Printf("Local Table Size: %x\n", f.LocalColorTableSize)
+	// }
+	fmt.Printf("Interlaced: %v\n", f.Interlaced)
+	fmt.Printf("Image Data: %v\n", f.FrameImage.Pix)
+}
+
 // TODO: implement func (f *GIFFrame) patchFrame() (err error)
 
 // returns the subsection of the frame contained in the actual frame data
@@ -587,10 +634,20 @@ type GIF struct {
 	Frames []*GIFFrame
 }
 
+func (g *GIF) printDebug() {
+	g.Header.printDebug()
+	println()
+	for i, frame := range g.Frames {
+		fmt.Printf("Frame %v:\n", i+1)
+		frame.printDebug()
+		println()
+	}
+}
+
 // TODO: uncomment this later...
 // func (g *GIF) patchGIF() (err error) {
 // 	err = g.Header.patchHeader()
-// 	if err != nil {ds
+// 	if err != nil {
 // 		return
 // 	}
 // 	for _, frame := range g.Frames() {

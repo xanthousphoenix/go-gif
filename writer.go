@@ -96,7 +96,7 @@ func EncodeAll(w io.Writer, g *GIF) (err error) {
 		return
 	}
 
-	// g.patchGIF() // not implemented yet
+	// g.patchGIF() // not implemented yet, should take a gif and add in any missing data that's required
 
 	e := encoder{}
 	if ww, ok := w.(writer); ok {
@@ -170,7 +170,7 @@ func (h *GIFHeader) makeHeaderPackedField() byte {
 	if h.GlobalColorTablePresent {
 		val = 0x80
 	}
-	return val | byte((h.ColorResolution-1)<<4) | byte(h.GlobalColorTableSize-1)
+	return val | byte((h.ColorResolution)<<4) | byte(h.GlobalColorTableSize-1)
 }
 
 func (e *encoder) writeColorTable(p color.Palette, cts uint8) (err error) {
@@ -217,7 +217,7 @@ func (e *encoder) writeFrame(f *GIFFrame) (err error) {
 	if f.GCPresent {
 		err = e.writeGraphicsControl(f)
 		if err != nil {
-			return
+			return err
 		}
 	}
 
@@ -229,12 +229,12 @@ func (e *encoder) writeFrame(f *GIFFrame) (err error) {
 	if f.LocalColorTablePresent {
 		err = e.writeColorTable(f.LocalColorTable, f.LocalColorTableSize)
 		if err != nil {
-			return
+			return err
 		}
 	}
 
 	err = e.writeImageData(f)
-	return
+	return err
 }
 
 func (e *encoder) writeGraphicsControl(f *GIFFrame) error {
@@ -279,7 +279,7 @@ func (f *GIFFrame) makeImageDescriptorPackedField() byte {
 	if f.Interlaced {
 		val2 = 0x40
 	}
-	return val1 | val2 | byte(f.LocalColorTableSize)
+	return val1 | val2 | byte(f.LocalColorTableSize-1)
 }
 
 func (e *encoder) writeImageData(f *GIFFrame) (err error) {
@@ -287,13 +287,14 @@ func (e *encoder) writeImageData(f *GIFFrame) (err error) {
 	if litWidth < 2 {
 		litWidth = 2
 	}
-	err = e.w.WriteByte(uint8(litWidth)) // LZW Minimum Code Size.
+	err = e.w.WriteByte(uint8(8)) // LZW Minimum Code Size.
 
-	lzww := lzw.NewWriter(blockWriter{e: e}, lzw.LSB, int(litWidth))
+	lzww := lzw.NewWriter(blockWriter{e: e}, lzw.LSB, int(8))
+	fmt.Printf("%v\n", f.FrameImage.Pix)
 	_, err = lzww.Write(f.FrameImage.Pix)
 	if err != nil {
 		lzww.Close()
-		return
+		return err
 	}
 	lzww.Close()
 	e.w.WriteByte(0x00) // Block Terminator.
